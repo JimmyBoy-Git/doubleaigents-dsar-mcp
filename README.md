@@ -15,6 +15,10 @@ A public, read-only [MCP](https://modelcontextprotocol.io) server for GDPR subje
 | `dsar_quote` | Fixed price for an outsourced DSAR by page count (GBP/EUR/CHF) |
 | `dsar_service_info` | What the Double AIgents DSAR service covers |
 | `dsar_request_scoping` | How to start a request (returns a mailto link; stores nothing) |
+| `breach_triage` | Likely reportability of a breach (unlikely / borderline / likely / high risk), with reasons and the 72-hour deadline |
+| `ai_tool_check` | DPIA screening and EU AI Act risk flags for an AI tool, with sources |
+| `hr_retention` | How long to keep 14 common UK HR records, with the legal source |
+| `dsar_search_checklist` | Where to search for an employee DSAR |
 
 General information, not legal advice. The controller decides.
 
@@ -34,7 +38,7 @@ Stateless. No storage, no accounts. Usage is counted as one log line per call (t
 
 ## Code
 
-`api/mcp.ts` is the Vercel serverless function that serves the endpoint, mirrored from our site. No dependencies.
+`api/mcp.ts` (the Vercel serverless function) and `src/lib/dpTools.ts` (the shared rules, also used by the free tools page at https://www.doubleaigents.com/free-tools) are mirrored from our site. No dependencies.
 
 ## About
 

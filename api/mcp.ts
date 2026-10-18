@@ -24,6 +24,32 @@
 //      note) is the single price list. The table below is a copy of it and
 //      MUST be changed in the same commit as Pricing.tsx.
 //   4. Deadline output is general information, not legal advice, and says so.
+//   5. ai_tool_check's use_case is free text: it is read in memory for keyword
+//      matching only, never logged, stored or echoed back.
+
+import {
+  SITE,
+  CONTACT,
+  NOT_ADVICE,
+  ToolInputError,
+  type YMD,
+  type Jurisdiction,
+  parseIsoDate,
+  addMonths,
+  addDays,
+  iso,
+  MONTHS,
+  dsarDeadline,
+  breachClock,
+  breachTriage,
+  aiToolCheck,
+  hrRetention,
+  dsarSearchChecklist,
+  RECIPIENTS,
+  RECOVERABLE,
+  ORG_TYPES,
+  HR_RECORD_TYPES,
+} from '../src/lib/dpTools.js';
 
 type VercelRequest = {
   method?: string;
@@ -36,10 +62,8 @@ type VercelResponse = {
   status(code: number): { json(body: unknown): void; end(): void };
 };
 
-const SITE = 'https://www.doubleaigents.com';
 const ENDPOINT = `${SITE}/api/mcp`;
-const CONTACT = 'james@doubleaigents.com';
-const SERVER_INFO = { name: 'doubleaigents-dsar', title: 'Double AIgents DSAR service', version: '1.1.0' };
+const SERVER_INFO = { name: 'doubleaigents-dsar', title: 'Double AIgents DSAR service', version: '1.2.0' };
 
 const MODERN_VERSIONS = ['2026-07-28'];
 const LEGACY_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26'];
@@ -50,145 +74,15 @@ const INSTRUCTIONS =
   'Double AIgents prepares responses to data subject access requests (DSARs) for organisations in the UK, the EU/EEA and Switzerland. ' +
   'Use dsar_deadline for the statutory response date, dsar_quote for our fixed price, dsar_service_info for what the service covers, ' +
   'dsar_letter_template for acknowledgement, extension and clarification letters, breach_clock for the personal data breach notification deadline, ' +
-  'and dsar_request_scoping to give the user a prefilled email to start free scoping. All tools are read-only; nothing sent to them is stored. ' +
+  'and dsar_request_scoping to give the user a prefilled email to start free scoping. ' +
+  'Free data protection tools: breach_triage for a likely-reportability view on a personal data breach, ai_tool_check for DPIA and EU AI Act screening of an AI tool, ' +
+  'hr_retention for UK retention periods for common HR records, and dsar_search_checklist for where to search when answering an employee DSAR. ' +
+  'All tools are read-only; nothing sent to them is stored. We recommend; the controller decides. ' +
   'Do not send the requester\'s personal data or the request letter through these tools.';
 
-const NOT_ADVICE =
-  'General information, not legal advice. Check the facts of the request, and take advice where the position is unclear.';
-
-// ---------------------------------------------------------------------------
-// Dates (all UTC, date-only)
-
-type YMD = { y: number; m: number; d: number }; // m is 1-12
-
-function parseIsoDate(s: unknown): YMD | null {
-  if (typeof s !== 'string') return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s.trim().slice(0, 10));
-  if (!m) return null;
-  const y = Number(m[1]);
-  const mo = Number(m[2]);
-  const d = Number(m[3]);
-  if (mo < 1 || mo > 12 || d < 1 || d > daysInMonth(y, mo)) return null;
-  return { y, m: mo, d };
-}
-
-function daysInMonth(y: number, m: number): number {
-  return new Date(Date.UTC(y, m, 0)).getUTCDate();
-}
-
-/** Add calendar months; if the target month has no corresponding day, use its last day. */
-function addMonths(date: YMD, n: number): YMD {
-  const total = date.y * 12 + (date.m - 1) + n;
-  const y = Math.floor(total / 12);
-  const m = (total % 12) + 1;
-  return { y, m, d: Math.min(date.d, daysInMonth(y, m)) };
-}
-
-function addDays(date: YMD, n: number): YMD {
-  const t = new Date(Date.UTC(date.y, date.m - 1, date.d + n));
-  return { y: t.getUTCFullYear(), m: t.getUTCMonth() + 1, d: t.getUTCDate() };
-}
-
-function iso(date: YMD): string {
-  return `${date.y}-${String(date.m).padStart(2, '0')}-${String(date.d).padStart(2, '0')}`;
-}
-
-const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-
-function weekday(date: YMD): number {
-  return new Date(Date.UTC(date.y, date.m - 1, date.d)).getUTCDay();
-}
-
-function longDate(date: YMD): string {
-  return `${WEEKDAYS[weekday(date)]} ${date.d} ${MONTHS[date.m - 1]} ${date.y}`;
-}
-
-function nextWeekday(date: YMD): YMD {
-  const wd = weekday(date);
-  if (wd === 6) return addDays(date, 2);
-  if (wd === 0) return addDays(date, 1);
-  return date;
-}
-
-// ---------------------------------------------------------------------------
-// Tool: dsar_deadline
-
-type Jurisdiction = 'UK' | 'EU' | 'CH';
-
-function dsarDeadline(args: Record<string, unknown>) {
-  const j = String(args.jurisdiction ?? '').toUpperCase() as Jurisdiction;
-  if (!['UK', 'EU', 'CH'].includes(j)) throw new ToolInputError('jurisdiction must be "UK", "EU" or "CH".');
-  const received = parseIsoDate(args.received_date);
-  if (!received) throw new ToolInputError('received_date must be an ISO date, for example 2026-03-15.');
-  const extended = args.extended === true;
-
-  if (j === 'CH') {
-    const due = addDays(received, 30);
-    return {
-      jurisdiction: 'CH',
-      received_date: iso(received),
-      due_date: iso(due),
-      due_date_long: longDate(due),
-      extended_requested: extended,
-      extended_due_date: null,
-      rule:
-        'Switzerland (revised FADP Art. 25(7); Data Protection Ordinance Art. 18): information must be provided within 30 days of receipt of the request. ' +
-        'The period can be extended only if, within those 30 days, the controller tells the data subject that it needs longer, gives its reasons and states the period within which it will respond. ' +
-        'The law sets no fixed maximum extension, so no extended date is calculated.',
-      notes: [
-        'Counted as 30 calendar days from the date of receipt.',
-        ...(extended ? ['Extension requested: notify the data subject, with reasons and the new period, on or before ' + iso(due) + '.'] : []),
-      ],
-      disclaimer: NOT_ADVICE,
-    };
-  }
-
-  const due = addMonths(received, 1);
-  const extDue = addMonths(received, 3);
-  const weekendNote = (d: YMD) =>
-    weekday(d) === 0 || weekday(d) === 6
-      ? j === 'EU'
-        ? `${iso(d)} is a ${WEEKDAYS[weekday(d)]}. Under Regulation 1182/71, which the EDPB applies to Art. 12(3), a period ending on a weekend or public holiday runs to the end of the next working day (${iso(nextWeekday(d))}, before any public holiday).`
-        : `${iso(d)} is a ${WEEKDAYS[weekday(d)]}. ICO guidance has said that where the date falls on a weekend or bank holiday the controller has until the next working day (${iso(nextWeekday(d))}, before any bank holiday).`
-      : null;
-
-  const ruleUK =
-    'UK (UK GDPR Art. 12(3) and Art. 12A, as inserted by the Data (Use and Access) Act 2025): respond without undue delay and within one month of the "relevant time". ' +
-    'The relevant time is the day the request is received, or, if later, the day the controller receives any information it reasonably requested to confirm identity, or any fee that is payable. ' +
-    'The month ends on the corresponding calendar day of the next month; if there is no corresponding day, it ends on the last day of that month. ' +
-    'Where the request is complex or the data subject has made a number of requests, the period can be extended by up to two further months, provided the data subject is told of the extension, with reasons, within the first month. ' +
-    'If the controller reasonably needs the data subject to clarify the information or processing the request concerns, the period does not run while it waits for that clarification.';
-  const ruleEU =
-    'EU/EEA (GDPR Art. 12(3)): respond without undue delay and in any event within one month of receipt of the request. ' +
-    'The month ends on the corresponding calendar day of the next month; if there is no corresponding day, it ends on the last day of that month. ' +
-    'Where necessary, taking into account the complexity and number of requests, the period can be extended by two further months, provided the data subject is told of the extension, with reasons, within one month of receipt. ' +
-    'Member State law and supervisory authority guidance may add detail.';
-
-  const notes: string[] = [];
-  if (j === 'UK') notes.push('Pass as received_date the relevant time: the later of receipt, receipt of requested ID, or receipt of any fee.');
-  const w = weekendNote(due);
-  if (w) notes.push(w);
-  if (extended) {
-    notes.push(`Extension: notify the data subject, with reasons, on or before ${iso(due)}.`);
-    const we = weekendNote(extDue);
-    if (we) notes.push(we);
-  }
-
-  return {
-    jurisdiction: j,
-    received_date: iso(received),
-    due_date: iso(due),
-    due_date_long: longDate(due),
-    extended_requested: extended,
-    extended_due_date: extended ? iso(extDue) : null,
-    extended_due_date_long: extended ? longDate(extDue) : null,
-    extension_notice_by: extended ? iso(due) : null,
-    rule: j === 'UK' ? ruleUK : ruleEU,
-    notes,
-    disclaimer: NOT_ADVICE,
-  };
-}
+// Pure tool logic (dates, deadlines, breach clock and triage, AI tool check,
+// HR retention, DSAR search checklist) lives in src/lib/dpTools.ts, shared
+// with the free tools page so both give the same answers.
 
 // ---------------------------------------------------------------------------
 // Tool: dsar_quote  (copy of src/pages/Pricing.tsx -- keep in step)
@@ -359,153 +253,6 @@ function dsarRequestScoping(args: Record<string, unknown>) {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: breach_clock
-
-type Instant = { ms: number; offsetMin: number };
-
-function parseIsoDateTime(s: unknown): Instant | null {
-  if (typeof s !== 'string') return null;
-  const t = s.trim();
-  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/i.exec(t);
-  if (!m || !parseIsoDate(m[1])) return null;
-  if (Number(m[2]) > 23 || Number(m[3]) > 59 || Number(m[4] ?? 0) > 59) return null;
-  let offsetMin = 0;
-  if (m[5].toUpperCase() !== 'Z') {
-    const sign = m[5][0] === '-' ? -1 : 1;
-    const oh = Number(m[5].slice(1, 3));
-    const om = Number(m[5].slice(4, 6));
-    if (oh > 14 || om > 59) return null;
-    offsetMin = sign * (oh * 60 + om);
-  }
-  const ms = Date.parse(t);
-  if (Number.isNaN(ms)) return null;
-  return { ms, offsetMin };
-}
-
-function pad2(n: number): string {
-  return String(n).padStart(2, '0');
-}
-
-function offsetText(min: number): string {
-  const a = Math.abs(min);
-  return `${min < 0 ? '-' : '+'}${pad2(Math.floor(a / 60))}:${pad2(a % 60)}`;
-}
-
-/** Wall-clock fields of an instant at a fixed UTC offset. */
-function wallAtOffset(ms: number, offsetMin: number) {
-  const t = new Date(ms + offsetMin * 60000);
-  const date: YMD = { y: t.getUTCFullYear(), m: t.getUTCMonth() + 1, d: t.getUTCDate() };
-  return { date, hh: t.getUTCHours(), mm: t.getUTCMinutes(), ss: t.getUTCSeconds() };
-}
-
-function isoAtOffset(ms: number, offsetMin: number): string {
-  const w = wallAtOffset(ms, offsetMin);
-  return `${iso(w.date)}T${pad2(w.hh)}:${pad2(w.mm)}:${pad2(w.ss)}${offsetText(offsetMin)}`;
-}
-
-/** UTC offset of Europe/London at an instant, in minutes (0 for GMT, 60 for BST). */
-function londonOffset(ms: number): number {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Europe/London',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(new Date(ms));
-  const p = (type: string) => Number(parts.find((x) => x.type === type)?.value);
-  const wallAsUtc = Date.UTC(p('year'), p('month') - 1, p('day'), p('hour'), p('minute'), p('second'));
-  return Math.round((wallAsUtc - Math.floor(ms / 1000) * 1000) / 60000);
-}
-
-function readableAt(ms: number, offsetMin: number, zoneLabel: string): string {
-  const w = wallAtOffset(ms, offsetMin);
-  return `${longDate(w.date)}, ${pad2(w.hh)}:${pad2(w.mm)} ${zoneLabel}`;
-}
-
-const BREACH_FACTS = [
-  'The date and time the organisation became aware of the breach, and how it found out.',
-  'The nature of the breach: what happened, when it started and whether it is still going on.',
-  'The categories and approximate number of people affected.',
-  "The categories and approximate number of personal data records concerned, and whether special category data (for example health) or children's data is involved.",
-  'Who received or could access the data, and whether it has been recalled, deleted or contained.',
-  'The likely consequences for the people affected.',
-  'The measures taken or proposed to deal with the breach and to reduce its possible adverse effects.',
-  'The name and contact details of the data protection officer or other contact point.',
-];
-
-const BREACH_DECIDE =
-  'Whether and when to notify is for the controller to decide. We recommend recording the decision and the reasons for it, whichever way it goes.';
-
-function breachClock(args: Record<string, unknown>) {
-  const j = String(args.jurisdiction ?? '').toUpperCase() as Jurisdiction;
-  if (!['UK', 'EU', 'CH'].includes(j)) throw new ToolInputError('jurisdiction must be "UK", "EU" or "CH".');
-  const aware = parseIsoDateTime(args.aware_at);
-  if (!aware) {
-    throw new ToolInputError(
-      'aware_at must be an ISO date and time with a time zone, for example 2026-10-17T09:30:00+01:00 or 2026-10-17T08:30:00Z.',
-    );
-  }
-  const awareIso = isoAtOffset(aware.ms, aware.offsetMin);
-
-  if (j === 'CH') {
-    return {
-      jurisdiction: 'CH',
-      aware_at: awareIso,
-      deadline: null,
-      deadline_note: 'Swiss law sets no fixed number of hours. Notification is due as soon as possible.',
-      rule:
-        'Switzerland (revised FADP Art. 24): the controller must notify the Federal Data Protection and Information Commissioner (FDPIC) as soon as possible of a data security breach that is likely to result in a high risk to the personality or fundamental rights of the data subject.',
-      processor: 'A processor must report a data security breach to the controller as soon as possible (revised FADP Art. 24(3)).',
-      individuals:
-        'Informing the people affected is a separate duty: required where it is necessary for their protection or where the FDPIC requests it (revised FADP Art. 24(4)).',
-      facts_regulator_will_ask_for: BREACH_FACTS,
-      notes: [
-        'The Data Protection Ordinance (Art. 15) sets out what the notification must contain. Information not yet available can follow as soon as possible.',
-        'Every data security breach should be documented, whether or not it is notified (Data Protection Ordinance Art. 15(4)).',
-        BREACH_DECIDE,
-      ],
-      disclaimer: NOT_ADVICE,
-    };
-  }
-
-  const deadlineMs = aware.ms + 72 * 3600 * 1000;
-  const zoneOffset = j === 'UK' ? londonOffset(deadlineMs) : aware.offsetMin;
-  const zoneLabel = j === 'UK' ? `${zoneOffset === 60 ? 'BST' : 'GMT'}, London time` : `(UTC${offsetText(zoneOffset)})`;
-  const passed = Date.now() > deadlineMs;
-  const law = j === 'UK' ? 'UK GDPR' : 'GDPR';
-  const authority =
-    j === 'UK' ? "the Information Commissioner's Office (ICO)" : 'the competent supervisory authority (the lead supervisory authority, where there is one)';
-
-  return {
-    jurisdiction: j,
-    aware_at: awareIso,
-    deadline: isoAtOffset(deadlineMs, zoneOffset),
-    deadline_utc: new Date(deadlineMs).toISOString().replace('.000Z', 'Z'),
-    deadline_readable: readableAt(deadlineMs, zoneOffset, zoneLabel),
-    deadline_passed: passed,
-    rule:
-      `${j === 'UK' ? 'UK' : 'EU/EEA'} (${law} Art. 33(1)): the controller must notify ${authority} of a personal data breach without undue delay and, where feasible, not later than 72 hours after having become aware of it, ` +
-      'unless the breach is unlikely to result in a risk to the rights and freedoms of individuals. Where notification is not made within 72 hours, it must be accompanied by reasons for the delay.',
-    processor: `A processor must notify the controller without undue delay after becoming aware of a personal data breach (${law} Art. 33(2)). The 72 hours run from when the controller becomes aware.`,
-    individuals: `Telling the people affected is a separate duty (${law} Art. 34): required without undue delay where the breach is likely to result in a high risk to their rights and freedoms.`,
-    facts_regulator_will_ask_for: BREACH_FACTS,
-    notes: [
-      `Information not yet available can be provided in phases, without further undue delay (${law} Art. 33(4)).`,
-      `Every personal data breach must be documented, whether or not it is notified (${law} Art. 33(5)).`,
-      j === 'UK'
-        ? 'Providers of public electronic communications services have a separate 24-hour notification rule under PECR.'
-        : 'Member State law and sector rules may add separate notification duties.',
-      ...(passed ? ['This deadline has passed. A late notification must give the reasons for the delay.'] : []),
-      BREACH_DECIDE,
-    ],
-    disclaimer: NOT_ADVICE,
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Tool: dsar_letter_template
 
 type LetterKind = 'acknowledgement' | 'extension' | 'clarification';
@@ -524,7 +271,7 @@ function optionalDate(v: unknown, name: string): YMD | null {
 const COMPLAINT_LINE: Record<Jurisdiction, string> = {
   UK:
     'If you are unhappy with how we have handled your request, you can complain to us first at [contact email or address] and we will look into it. ' +
-    "You also have the right to complain to the Information Commissioner's Office (ico.org.uk).",
+    "You also have the right to complain to the Information Commission (ICO, ico.org.uk).",
   EU:
     'If you are unhappy with how we have handled your request, you can contact us at [contact email or address]. ' +
     'You also have the right to complain to a data protection supervisory authority, in particular in the country where you live or work.',
@@ -658,8 +405,6 @@ function dsarLetterTemplate(args: Record<string, unknown>) {
 // ---------------------------------------------------------------------------
 // Tool registry
 
-class ToolInputError extends Error {}
-
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 
 const TOOLS = [
@@ -776,6 +521,102 @@ const TOOLS = [
     annotations: { title: 'DSAR letter template', ...READ_ONLY },
     run: dsarLetterTemplate,
   },
+  {
+    name: 'breach_triage',
+    title: 'Personal data breach triage',
+    description:
+      'A likely-reportability view on a personal data breach (UK, EU/EEA, Switzerland), following the ICO guide "Personal data breaches: a guide" and EDPB Guidelines 9/2022: whether notifying the regulator and telling the people affected is likely or unlikely to be required, the factors behind that view, and the notification deadline. The controller decides. General information, not legal advice. Do not pass names or other personal data.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jurisdiction: { type: 'string', enum: ['UK', 'EU', 'CH'], description: 'UK, EU (EU/EEA GDPR) or CH (Switzerland).' },
+        aware_at: {
+          type: 'string',
+          format: 'date-time',
+          description: 'ISO date and time, with time zone, when the controller became aware of the breach. Example: 2026-10-17T09:30:00+01:00.',
+        },
+        people_affected: {
+          oneOf: [{ type: 'integer', minimum: 0 }, { type: 'string', enum: ['unknown'] }],
+          description: 'Approximate number of people affected, or "unknown".',
+        },
+        special_category: { type: 'boolean', description: 'True if special category or criminal offence data is involved (health, biometric, criminal records, etc.).' },
+        recipient: {
+          type: 'string',
+          enum: [...RECIPIENTS],
+          description: 'Who received or could access the data: a trusted internal person, a trusted external professional, unknown or the public, or a malicious actor.',
+        },
+        recoverable: { type: 'string', enum: [...RECOVERABLE], description: 'Whether the data has been recovered or deletion confirmed, is likely to be, or not.' },
+        encrypted: { type: 'boolean', description: 'True if the data was strongly encrypted and the key was not compromised.' },
+      },
+      required: ['jurisdiction', 'aware_at', 'people_affected', 'special_category', 'recipient', 'recoverable', 'encrypted'],
+      additionalProperties: false,
+    },
+    annotations: { title: 'Personal data breach triage', ...READ_ONLY },
+    run: breachTriage,
+  },
+  {
+    name: 'ai_tool_check',
+    title: 'AI tool check: DPIA and EU AI Act screening',
+    description:
+      'Screens a planned use of an AI tool: whether a DPIA is likely to be required (Art. 35(3), the ICO high-risk list, the WP248 criteria; FADP Art. 22 for Switzerland), EU AI Act risk flags (Annex III high-risk areas, especially employment; Art. 5 prohibited practices such as emotion recognition at work; current application dates after the Digital Omnibus), and automated decision rules (GDPR Art. 22, UK GDPR Arts 22A to 22D). Findings with sources. The use_case text is not stored or returned. General information, not legal advice.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        use_case: { type: 'string', maxLength: 500, description: 'Short description of what the AI tool does. No personal data. Not stored.' },
+        processes_personal_data: { type: 'boolean' },
+        special_category: { type: 'boolean', description: 'Health, biometric, criminal offence data and the like.' },
+        employees_or_candidates: { type: 'boolean', description: 'True if it processes data about staff or job candidates.' },
+        automated_decisions_with_significant_effect: { type: 'boolean', description: 'True if it makes or drives decisions with legal or similarly significant effects without meaningful human involvement.' },
+        new_technology: { type: 'boolean', description: 'True if it is an innovative use or new technology for the organisation.' },
+        large_scale: { type: 'boolean' },
+        jurisdiction: { type: 'string', enum: ['UK', 'EU', 'CH'], description: 'UK, EU (EU/EEA) or CH (Switzerland).' },
+      },
+      required: [
+        'use_case',
+        'processes_personal_data',
+        'special_category',
+        'employees_or_candidates',
+        'automated_decisions_with_significant_effect',
+        'new_technology',
+        'large_scale',
+        'jurisdiction',
+      ],
+      additionalProperties: false,
+    },
+    annotations: { title: 'AI tool check', ...READ_ONLY },
+    run: aiToolCheck,
+  },
+  {
+    name: 'hr_retention',
+    title: 'HR record retention periods (UK)',
+    description:
+      'Recommended retention period for a common UK HR record, whether it is statutory or only recommended, and the source (HMRC, Home Office, RIDDOR 2013, Working Time Regulations, Limitation Act 1980, ICO, DBS). UK only for now. General information, not legal advice.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        record_type: { type: 'string', enum: [...HR_RECORD_TYPES] },
+        jurisdiction: { type: 'string', enum: ['UK'], default: 'UK' },
+      },
+      required: ['record_type'],
+      additionalProperties: false,
+    },
+    annotations: { title: 'HR record retention periods (UK)', ...READ_ONLY },
+    run: hrRetention,
+  },
+  {
+    name: 'dsar_search_checklist',
+    title: 'DSAR search checklist',
+    description:
+      'Where to search when answering a subject access request, especially from an employee: Microsoft 365 (Exchange and archives, shared mailboxes, Teams, OneDrive, SharePoint), other collaboration tools, HR, payroll, recruitment, CCTV, access logs, devices, line manager notes, paper files, occupational health and backups; search-term tips; and the search standard (UK GDPR Art. 15(1A) reasonable and proportionate searches). General information, not legal advice.',
+    inputSchema: {
+      type: 'object',
+      properties: { organisation_type: { type: 'string', enum: [...ORG_TYPES] } },
+      required: ['organisation_type'],
+      additionalProperties: false,
+    },
+    annotations: { title: 'DSAR search checklist', ...READ_ONLY },
+    run: dsarSearchChecklist,
+  },
 ];
 
 function toolList() {
@@ -813,7 +654,7 @@ export const SERVER_CARD = {
   title: SERVER_INFO.title,
   version: SERVER_INFO.version,
   description:
-    'Read-only tools for the Double AIgents subject access request (DSAR) service: statutory deadlines (UK, EU/EEA, Switzerland), letter templates (acknowledgement, extension, clarification), the personal data breach notification clock, fixed-price quotes, service information and how to start free scoping.',
+    'Read-only tools for the Double AIgents subject access request (DSAR) service: statutory deadlines (UK, EU/EEA, Switzerland), letter templates (acknowledgement, extension, clarification), the personal data breach notification clock, fixed-price quotes, service information and how to start free scoping. Free data protection tools: breach triage, AI tool check (DPIA and EU AI Act screening), UK HR record retention periods and a DSAR search checklist.',
   websiteUrl: SITE,
   remotes: [{ type: 'streamable-http', url: ENDPOINT, supportedProtocolVersions: ALL_VERSIONS }],
 };
