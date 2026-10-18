@@ -1,0 +1,11 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.doubleaigents.www/dsar",
+  "title": "Double AIgents DSAR service",
+  "description": "GDPR DSAR deadlines, breach clock, letter templates and fixed quotes for outsourced DSARs (UK/EU)",
+  "websiteUrl": "https://www.doubleaigents.com/#sar",
+  "version": "1.1.0",
+  "remotes": [
+    { "type": "streamable-http", "url": "https://www.doubleaigents.com/api/mcp" }
+  ]
+}
